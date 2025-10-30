@@ -3,8 +3,8 @@
 #property link      "www.forex-tsd.com"
 //------------------------------------------------------------------
 #property indicator_separate_window
-#property indicator_buffers   6
-#property indicator_plots     5
+#property indicator_buffers   9
+#property indicator_plots     8
 
 #property indicator_label1  "Spearman levels"
 #property indicator_type1   DRAW_FILLING
@@ -25,6 +25,18 @@
 #property indicator_type5   DRAW_LINE
 #property indicator_color5  clrDimGray
 #property indicator_width5  2
+#property indicator_label6  "Smoothed Spearman"
+#property indicator_type6   DRAW_LINE
+#property indicator_color6  clrDeepSkyBlue
+#property indicator_width6  2
+#property indicator_label7  "Buy signal"
+#property indicator_type7   DRAW_ARROW
+#property indicator_color7  clrLimeGreen
+#property indicator_width7  2
+#property indicator_label8  "Sell signal"
+#property indicator_type8   DRAW_ARROW
+#property indicator_color8  clrTomato
+#property indicator_width8  2
 #property indicator_minimum  -1
 #property indicator_maximum  +1
 
@@ -62,9 +74,17 @@ enum enCorrType
 input int        Rank        = 32;       // Rank period
 input enCorrType CorType     = cor_spe;  // Correlation type
 input enPrices   Price       = pr_close; // Price to use
-input  int       flLookBack  = 25;       // Floating levels look back period (<0 for fixed levels, 0 to use rank period)
-input  double    flLevelUp   = 90;       // Floating levels up level %
-input  double    flLevelDown = 10;       // Floating levels down level %
+input  int       flLookBack     = 25;       // Floating levels look back period (<0 for fixed levels, 0 to use rank period)
+input  bool      UsePercentiles = true;     // Use percentile based floating levels
+input  double    flLevelUp      = 90;       // Floating levels up level %
+input  double    flLevelDown    = 10;       // Floating levels down level %
+input  int       SmoothPeriod   = 5;        // EMA smoothing period (0/1 to disable)
+input  bool      alertsOn       = false;    // Enable alerts
+input  bool      alertsOnCurrent= false;    // Alert on current (open) bar
+input  bool      alertsNotify   = false;    // Send push notification
+input  bool      alertsEmail    = false;    // Send email notification
+input  bool      alertsSound    = false;    // Play alert sound
+input  string    alertsSoundFile= "alert.wav"; // Sound file name
 
 //
 //
@@ -72,7 +92,10 @@ input  double    flLevelDown = 10;       // Floating levels down level %
 //
 //
 
-double sr[],levelup[],levelmi[],leveldn[],fill1[],fill2[];
+double sr[],signal[],levelup[],levelmi[],leveldn[],fill1[],fill2[],arrowUp[],arrowDn[];
+double percentileBuffer[];
+datetime lastAlertBuy=0;
+datetime lastAlertSell=0;
 
 //------------------------------------------------------------------
 //
@@ -90,8 +113,22 @@ int OnInit()
    SetIndexBuffer(3,levelmi,INDICATOR_DATA);
    SetIndexBuffer(4,leveldn,INDICATOR_DATA);
    SetIndexBuffer(5,sr     ,INDICATOR_DATA);
-   
-   IndicatorSetString(INDICATOR_SHORTNAME,getCorrelationName(CorType)+" rank (auto)correlation ("+(string)Rank+","+(string)+flLookBack+")");
+   SetIndexBuffer(6,signal ,INDICATOR_DATA);
+   SetIndexBuffer(7,arrowUp,INDICATOR_DATA);
+   SetIndexBuffer(8,arrowDn,INDICATOR_DATA);
+
+   PlotIndexSetInteger(5,PLOT_DRAW_BEGIN,SmoothPeriod);
+   PlotIndexSetInteger(6,PLOT_ARROW,233);
+   PlotIndexSetInteger(7,PLOT_ARROW,234);
+   PlotIndexSetDouble(6,PLOT_EMPTY_VALUE,EMPTY_VALUE);
+   PlotIndexSetDouble(7,PLOT_EMPTY_VALUE,EMPTY_VALUE);
+   SetIndexEmptyValue(7,EMPTY_VALUE);
+   SetIndexEmptyValue(8,EMPTY_VALUE);
+
+   lastAlertBuy  = 0;
+   lastAlertSell = 0;
+
+   IndicatorSetString(INDICATOR_SHORTNAME,getCorrelationName(CorType)+" rank (auto)correlation ("+(string)Rank+","+(string)flLookBack+")");
    return(0);
 }
 
@@ -126,29 +163,80 @@ int OnCalculate(const int rates_total,
    for (int i=(int)MathMax(prev_calculated-1,0); i<rates_total && !IsStopped(); i++)
    {
       sr[i] = iCorrelation(CorType,getPrice(Price,open,close,high,low,i,rates_total),Rank,i,rates_total);
+      signal[i] = sr[i];
+      arrowUp[i] = EMPTY_VALUE;
+      arrowDn[i] = EMPTY_VALUE;
+
       if (flperiod>0)
-      {            
-         double min = sr[i];
-         double max = sr[i];
-         for (int k=1; k<flperiod && (i-k)>=0; k++)
+      {
+         int lookback = (int)MathMin(flperiod,i+1);
+         if (UsePercentiles && lookback>1)
          {
-            min = MathMin(sr[i-k],min);
-            max = MathMax(sr[i-k],max);
+            ArrayResize(percentileBuffer,lookback);
+            for (int k=0; k<lookback; k++) percentileBuffer[k] = sr[i-k];
+            ArraySort(percentileBuffer,WHOLE_ARRAY,0,MODE_ASCEND);
+            levelup[i] = GetPercentile(percentileBuffer,lookback,flLevelUp/100.0);
+            leveldn[i] = GetPercentile(percentileBuffer,lookback,flLevelDown/100.0);
+            levelmi[i] = GetPercentile(percentileBuffer,lookback,0.5);
          }
-         double range = max-min;
-         levelup[i] = min+flLevelUp*range/100.0;
-         leveldn[i] = min+flLevelDown*range/100.0;
-         levelmi[i] = min+0.5*range;
+         else
+         {
+            double min = sr[i];
+            double max = sr[i];
+            for (int k=1; k<flperiod && (i-k)>=0; k++)
+            {
+               min = MathMin(sr[i-k],min);
+               max = MathMax(sr[i-k],max);
+            }
+            double range = max-min;
+            levelup[i] = min+flLevelUp*range/100.0;
+            leveldn[i] = min+flLevelDown*range/100.0;
+            levelmi[i] = min+0.5*range;
+         }
       }
       else
       {
-         levelup[i] = 2*flLevelUp  /100.0-1; 
+         levelup[i] = 2*flLevelUp  /100.0-1;
          leveldn[i] = 2*flLevelDown/100.0-1; 
          levelmi[i] = (levelup[i]+leveldn[i])*0.5;
       }       
+      if (SmoothPeriod>1)
+      {
+         if (i>0)
+               signal[i] = signal[i-1] + 2.0/(SmoothPeriod+1.0)*(sr[i]-signal[i-1]);
+         else  signal[i] = sr[i];
+      }
+
       fill1[i] = fill2[i] = sr[i];
-      if (sr[i]>levelup[i]) fill2[i] = levelup[i]; 
-      if (sr[i]<leveldn[i]) fill2[i] = leveldn[i]; 
+      if (sr[i]>levelup[i]) fill2[i] = levelup[i];
+      if (sr[i]<leveldn[i]) fill2[i] = leveldn[i];
+
+      if (i>0)
+      {
+         bool crossUp   = (signal[i-1]<=leveldn[i-1] && signal[i]>leveldn[i]);
+         bool crossDown = (signal[i-1]>=levelup[i-1] && signal[i]<levelup[i]);
+         bool lastBar   = (i==rates_total-1);
+         bool allowAlert = alertsOnCurrent || !lastBar;
+
+         if (crossUp)
+         {
+            arrowUp[i] = leveldn[i];
+            if (allowAlert && (alertsOn || alertsNotify || alertsEmail || alertsSound) && prev_calculated>0 && lastAlertBuy!=time[i])
+            {
+               DoSignalAlert(true,time[i],signal[i]);
+               lastAlertBuy = time[i];
+            }
+         }
+         if (crossDown)
+         {
+            arrowDn[i] = levelup[i];
+            if (allowAlert && (alertsOn || alertsNotify || alertsEmail || alertsSound) && prev_calculated>0 && lastAlertSell!=time[i])
+            {
+               DoSignalAlert(false,time[i],signal[i]);
+               lastAlertSell = time[i];
+            }
+         }
+      }
    }
    return(rates_total);
 }
@@ -330,5 +418,54 @@ double iSpearman(double value, int period, int i, int bars, int instanceNo=0)
    double data[]; ArrayResize(data, period); ArrayInitialize(data,0);
       for (int k=0; k<period && (i-k)>=0; k++) data[k] = workSpearman[i-k][instanceNo];
       for (int k=0; k<period; k++) { int max = ArrayMaximum(data); total += (max-k)*(max-k); data[max] = 0; }
-	return(1.0-6.0*total/(period*(period*period-1.0)));
+        return(1.0-6.0*total/(period*(period*period-1.0)));
+}
+
+//
+//
+//
+//
+//
+
+double GetPercentile(double &values[], int count, double percent)
+{
+   if (count<=0)
+      return(0.0);
+   if (percent<=0.0)
+      return(values[0]);
+   if (percent>=1.0)
+      return(values[count-1]);
+   double position = percent*(count-1);
+   int indexLow = (int)MathFloor(position);
+   int indexHigh = (int)MathCeil(position);
+   double value = values[indexLow];
+   if (indexHigh>indexLow)
+      value += (values[indexHigh]-values[indexLow])*(position-indexLow);
+   return(value);
+}
+
+//
+//
+//
+//
+//
+
+void DoSignalAlert(bool isBuy, datetime barTime, double value)
+{
+   string direction = isBuy ? "buy" : "sell";
+   string message   = StringFormat("%s %s signal from %s rank correlation on %s (%.3f)",
+                                   _Symbol,
+                                   direction,
+                                   getCorrelationName(CorType),
+                                   TimeToString(barTime,TIME_DATE|TIME_MINUTES),
+                                   value);
+
+   if (alertsOn)
+      Alert(message);
+   if (alertsNotify)
+      SendNotification(message);
+   if (alertsEmail)
+      SendMail("Rank correlation signal",message);
+   if (alertsSound && alertsSoundFile!="")
+      PlaySound(alertsSoundFile);
 }
