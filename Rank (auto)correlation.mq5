@@ -94,6 +94,7 @@ input  string    alertsSoundFile= "alert.wav"; // Sound file name
 
 double sr[],signal[],levelup[],levelmi[],leveldn[],fill1[],fill2[],arrowUp[],arrowDn[];
 double percentileBuffer[];
+int    drawBeginCorrelation=0;
 datetime lastAlertBuy=0;
 datetime lastAlertSell=0;
 
@@ -117,9 +118,21 @@ int OnInit()
    SetIndexBuffer(7,arrowUp,INDICATOR_DATA);
    SetIndexBuffer(8,arrowDn,INDICATOR_DATA);
 
-   PlotIndexSetInteger(5,PLOT_DRAW_BEGIN,SmoothPeriod);
+   int minRank       = (int)MathMax((double)Rank,1.0);
+   drawBeginCorrelation = minRank-1;
+   int smoothBegin   = (SmoothPeriod>1) ? SmoothPeriod-1 : 0;
+   int signalBegin   = (int)MathMax((double)drawBeginCorrelation,(double)smoothBegin);
+
+   PlotIndexSetInteger(0,PLOT_DRAW_BEGIN,drawBeginCorrelation);
+   PlotIndexSetInteger(1,PLOT_DRAW_BEGIN,drawBeginCorrelation);
+   PlotIndexSetInteger(2,PLOT_DRAW_BEGIN,drawBeginCorrelation);
+   PlotIndexSetInteger(3,PLOT_DRAW_BEGIN,drawBeginCorrelation);
+   PlotIndexSetInteger(4,PLOT_DRAW_BEGIN,drawBeginCorrelation);
+   PlotIndexSetInteger(5,PLOT_DRAW_BEGIN,signalBegin);
    PlotIndexSetInteger(6,PLOT_ARROW,233);
    PlotIndexSetInteger(7,PLOT_ARROW,234);
+   PlotIndexSetInteger(6,PLOT_DRAW_BEGIN,signalBegin);
+   PlotIndexSetInteger(7,PLOT_DRAW_BEGIN,signalBegin);
    PlotIndexSetDouble(6,PLOT_EMPTY_VALUE,EMPTY_VALUE);
    PlotIndexSetDouble(7,PLOT_EMPTY_VALUE,EMPTY_VALUE);
    SetIndexEmptyValue(7,EMPTY_VALUE);
@@ -160,12 +173,27 @@ int OnCalculate(const int rates_total,
    //
    
    int flperiod = flLookBack; if (flperiod==0) flperiod = Rank;
+   if (drawBeginCorrelation<0)
+      drawBeginCorrelation = (int)MathMax((double)Rank,1.0)-1;
    for (int i=(int)MathMax(prev_calculated-1,0); i<rates_total && !IsStopped(); i++)
    {
-      sr[i] = iCorrelation(CorType,getPrice(Price,open,close,high,low,i,rates_total),Rank,i,rates_total);
-      signal[i] = sr[i];
       arrowUp[i] = EMPTY_VALUE;
       arrowDn[i] = EMPTY_VALUE;
+
+      if (i<drawBeginCorrelation)
+      {
+         sr[i]      = EMPTY_VALUE;
+         signal[i]  = EMPTY_VALUE;
+         levelup[i] = EMPTY_VALUE;
+         levelmi[i] = EMPTY_VALUE;
+         leveldn[i] = EMPTY_VALUE;
+         fill1[i]   = EMPTY_VALUE;
+         fill2[i]   = EMPTY_VALUE;
+         continue;
+      }
+
+      sr[i] = iCorrelation(CorType,getPrice(Price,open,close,high,low,i,rates_total),Rank,i,rates_total);
+      signal[i] = sr[i];
 
       if (flperiod>0)
       {
@@ -202,7 +230,7 @@ int OnCalculate(const int rates_total,
       }       
       if (SmoothPeriod>1)
       {
-         if (i>0)
+         if (i>0 && signal[i-1]!=EMPTY_VALUE)
                signal[i] = signal[i-1] + 2.0/(SmoothPeriod+1.0)*(sr[i]-signal[i-1]);
          else  signal[i] = sr[i];
       }
@@ -211,7 +239,9 @@ int OnCalculate(const int rates_total,
       if (sr[i]>levelup[i]) fill2[i] = levelup[i];
       if (sr[i]<leveldn[i]) fill2[i] = leveldn[i];
 
-      if (i>0)
+      if (i>0 && signal[i]!=EMPTY_VALUE && signal[i-1]!=EMPTY_VALUE &&
+          leveldn[i]!=EMPTY_VALUE && leveldn[i-1]!=EMPTY_VALUE &&
+          levelup[i]!=EMPTY_VALUE && levelup[i-1]!=EMPTY_VALUE)
       {
          bool crossUp   = (signal[i-1]<=leveldn[i-1] && signal[i]>leveldn[i]);
          bool crossDown = (signal[i-1]>=levelup[i-1] && signal[i]<levelup[i]);
